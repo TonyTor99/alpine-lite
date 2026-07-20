@@ -1,9 +1,11 @@
-"""Точка входа: один лёгкий процесс.
+"""Точка входа: лёгкий процесс.
 
-Поток 1 (главный) — poll-loop: опрос рассылок раз в PARSER_INTERVAL_SECONDS,
-рассылка сигналов, отчёты по расписанию, ручные отчёты и релогин из очередей,
-служебные уведомления админам при сбоях.
-Поток 2 — TG-бот управления (long-poll getUpdates).
+Потоки:
+  main (poll-loop)  — опрос рассылок, планировщик отчётов, очереди отчётов/релогина,
+                      служебные уведомления, systemd-watchdog.
+  sender-worker     — асинхронная отправка (сигналы/итоги/отчёты), чтобы медленный
+                      TG/VK не блокировал опрос.
+  bot-loop          — TG-бот управления (long-poll getUpdates).
 """
 from __future__ import annotations
 
@@ -17,11 +19,12 @@ import time
 
 import requests
 
-from alpine_lite import reports, runner, senders
+from alpine_lite import netfix, reports, runner, senders
 from alpine_lite.alpinbet import AlpinbetAuthError, AlpinbetClient
 from alpine_lite.bot import ManagementBot
 from alpine_lite.config import Config
-from alpine_lite.runtime import RuntimeStatus
+from alpine_lite.runtime import RuntimeStatus, sd_notify
+from alpine_lite.sending import SenderWorker
 from alpine_lite.store import Store, seed_from_json
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,7 +53,7 @@ def classify_error(exc: Exception) -> tuple[str, str]:
     return "error", "⚠️ Ошибка опроса рассылки"
 
 
-def drain_report_queue(client, store, cfg, report_queue, reply):
+def drain_report_queue(client, store, cfg, worker, report_queue, reply):
     while True:
         try:
             chat_id, sid, kind = report_queue.get_nowait()
@@ -61,7 +64,7 @@ def drain_report_queue(client, store, cfg, report_queue, reply):
             reply(chat_id, f"Рассылка {sid} исчезла")
             continue
         try:
-            status = reports.run_one(client, store, cfg, source, kind, force=True)
+            status = reports.run_one(client, store, cfg, source, kind, worker, force=True)
             reply(chat_id, f"Отчёт {kind} [{sid}]: {status}")
         except Exception as exc:  # noqa: BLE001
             log.exception("ручной отчёт упал")
@@ -87,8 +90,21 @@ def drain_control_queue(client, cfg, status, control_queue, reply):
                 reply(chat_id, f"🔑 Релогин не удался: {exc}")
 
 
+def startup_telegram_check(cfg) -> None:
+    """Проверка доступности Telegram на старте; алерт админам при недоступности."""
+    try:
+        me = senders.tg_get_me(cfg.tg_token, cfg.http_timeout)
+        log.info("Telegram доступен: бот @%s", me.get("username"))
+    except Exception as exc:  # noqa: BLE001
+        log.error("Telegram НЕдоступен на старте: %s", exc)
+        senders.notify_admins(cfg.tg_token, cfg.admin_chat_ids,
+                              f"🌐 Telegram недоступен с сервера на старте:\n{str(exc)[:300]}",
+                              cfg.http_timeout)
+
+
 def main():
     global log
+    netfix.force_ipv4()
     cfg = Config()
     setup_logging(cfg.log_level)
     log = logging.getLogger("alpine.main")
@@ -110,6 +126,9 @@ def main():
     report_queue: "queue.Queue" = queue.Queue()
     control_queue: "queue.Queue" = queue.Queue()
 
+    worker = SenderWorker(cfg, store, stop_event)
+    worker.start()
+
     bot = ManagementBot(cfg, store, report_queue, control_queue, status, stop_event)
     bot.start()
 
@@ -118,6 +137,8 @@ def main():
         stop_event.set()
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
+
+    startup_telegram_check(cfg)
 
     # ранний логин: сразу знаем, живы ли креды, и наполняем статус
     try:
@@ -133,7 +154,7 @@ def main():
 
     repeat_sec = cfg.alert_repeat_minutes * 60
     alert_last: dict[str, float] = {}     # signature -> monotonic последнего уведомления
-    alert_active: dict[int, str] = {}     # source_id -> шапка активной проблемы (для «снова онлайн»)
+    alert_active: dict[int, str] = {}     # source_id -> шапка активной проблемы
 
     def _maybe_alert(source, exc):
         kind, header = classify_error(exc)
@@ -158,17 +179,20 @@ def main():
                                   f"✅ «{source.name}» снова онлайн — сигналы идут",
                                   cfg.http_timeout)
 
-    log.info("poll-loop запущен (интервал %d c)", cfg.interval)
+    sd_notify("READY=1")
+    log.info("poll-loop запущен")
     while not stop_event.is_set():
         start = time.monotonic()
+        interval = max(5, store.get_int_setting("interval", cfg.interval))
 
         # очереди из бота
-        drain_report_queue(client, store, cfg, report_queue, bot.reply)
+        drain_report_queue(client, store, cfg, worker, report_queue, bot.reply)
         drain_control_queue(client, cfg, status, control_queue, bot.reply)
 
         if store.is_paused():
+            sd_notify("WATCHDOG=1")
             status.mark_cycle()
-            stop_event.wait(max(1.0, cfg.interval - (time.monotonic() - start)))
+            stop_event.wait(max(1.0, interval - (time.monotonic() - start)))
             continue
 
         # опрос рассылок
@@ -176,7 +200,7 @@ def main():
             if stop_event.is_set():
                 break
             try:
-                res = runner.poll_source(client, store, cfg, source)
+                res = runner.poll_source(client, store, cfg, source, worker)
                 extra = ""
                 if res.get("sent") or res.get("settled"):
                     extra = f" | новых: {res['sent']}, завершено: {res['settled']}"
@@ -189,14 +213,15 @@ def main():
 
         # отчёты по расписанию
         try:
-            reports.maybe_send_scheduled(client, store, cfg)
+            reports.maybe_send_scheduled(client, store, cfg, worker)
         except Exception:  # noqa: BLE001
             log.exception("планировщик отчётов упал")
 
         status.set_logged_in(client.logged_in)
         status.mark_cycle()
+        sd_notify("WATCHDOG=1")
         elapsed = time.monotonic() - start
-        stop_event.wait(max(1.0, cfg.interval - elapsed))
+        stop_event.wait(max(1.0, interval - elapsed))
 
     store.close()
     log.info("Остановлено.")

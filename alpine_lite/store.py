@@ -238,12 +238,42 @@ class Store:
                 (outcome, profit_units, _now(), source_id, forecast_id))
             self._db.commit()
 
+    def set_signal_tg_targets(self, source_id: int, forecast_id: str,
+                              targets: list[tuple[str, int]]) -> None:
+        """Записать tg message_id постфактум (асинхронная отправка воркером)."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE signals SET tg_targets=? WHERE source_id=? AND forecast_id=?",
+                (json.dumps([[c, m] for c, m in targets]), source_id, forecast_id))
+            self._db.commit()
+
     @staticmethod
     def signal_tg_targets(row) -> list[tuple[str, int]]:
         try:
             return [(str(c), int(m)) for c, m in json.loads(row["tg_targets"] or "[]")]
         except (ValueError, TypeError):
             return []
+
+    # ---------- счётчики/активность по рассылке (для статуса) ----------
+    def counts_since_source(self, source_id: int, since_iso: str) -> tuple[int, int, int, int]:
+        """(отправлено, зашло, не зашло, возврат) по рассылке с since_iso."""
+        with self._lock:
+            r = self._db.execute(
+                "SELECT "
+                " SUM(CASE WHEN sent_at>=? THEN 1 ELSE 0 END), "
+                " SUM(CASE WHEN settled_at>=? AND outcome='win' THEN 1 ELSE 0 END), "
+                " SUM(CASE WHEN settled_at>=? AND outcome='lose' THEN 1 ELSE 0 END), "
+                " SUM(CASE WHEN settled_at>=? AND outcome='return' THEN 1 ELSE 0 END) "
+                "FROM signals WHERE source_id=?",
+                (since_iso, since_iso, since_iso, since_iso, source_id)).fetchone()
+            return tuple(int(x or 0) for x in r)  # type: ignore[return-value]
+
+    def recent_signals(self, source_id: int, limit: int = 5) -> list[dict]:
+        with self._lock:
+            return [dict(r) for r in self._db.execute(
+                "SELECT forecast_id, home_team, away_team, settled, outcome, "
+                "profit_units, sent_at FROM signals WHERE source_id=? "
+                "ORDER BY sent_at DESC LIMIT ?", (source_id, limit))]
 
     # ---------- stats dedup ----------
     def stats_already_sent(self, source_id: int, kind: str, period_key: str) -> bool:
@@ -277,6 +307,18 @@ class Store:
 
     def set_paused(self, paused: bool):
         self.set_setting("paused", "1" if paused else "0")
+
+    def get_int_setting(self, key: str, default: int) -> int:
+        try:
+            return int(self.get_setting(key, ""))
+        except (TypeError, ValueError):
+            return default
+
+    def get_bool_setting(self, key: str, default: bool) -> bool:
+        raw = self.get_setting(key, "")
+        if raw == "":
+            return default
+        return raw == "1"
 
     # ---------- счётчики за период (для статуса) ----------
     def counts_since(self, since_iso: str) -> tuple[int, int]:

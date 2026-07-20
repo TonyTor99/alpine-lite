@@ -244,12 +244,30 @@ class ManagementBot(threading.Thread):
 
         elif head == "dstadd":
             sid, kind = int(parts[1]), parts[2]
+            if kind == "vk":
+                self._answer(cb_id, "Запрашиваю у VK…")
+                self._edit(chat_id, mid, f"➕ Выбери VK-беседу для «{self._src_name(sid)}»:",
+                           self._vk_pick_kb(sid))
+            else:
+                self._pending[chat_id] = ("add_dest", sid, kind)
+                self._answer(cb_id)
+                self._edit(chat_id, mid, "➕ Пришли ответным сообщением chat_id канала (вида -100…)",
+                           _kb([[_btn("⬅️ Отмена", f"dst:{sid}")]]))
+
+        elif head == "dstaddm":  # ручной ввод, если чата нет в списке
+            sid, kind = int(parts[1]), parts[2]
             self._pending[chat_id] = ("add_dest", sid, kind)
             hint = ("chat_id канала (вида -100…)" if kind == "tg"
                     else "peer_id беседы VK (обычно 2000000000+id)")
             self._answer(cb_id)
             self._edit(chat_id, mid, f"➕ Пришли ответным сообщением {hint}",
                        _kb([[_btn("⬅️ Отмена", f"dst:{sid}")]]))
+
+        elif head == "vkpick":
+            sid, peer_id = int(parts[1]), parts[2]
+            self.store.add_destination(sid, "vk", peer_id, True, True)
+            self._answer(cb_id, "VK-беседа привязана ✅")
+            self._edit(chat_id, mid, self._dest_list_title(sid), self._dest_list_kb(sid))
 
         elif head == "dv":  # destination view
             did = int(parts[1])
@@ -321,6 +339,34 @@ class ManagementBot(threading.Thread):
             self._edit(chat_id, mid, self._status_text(),
                        _kb([[_btn("🔄 Обновить", "status")], [_btn("⬅️ В меню", "menu:main")]]))
 
+        elif head == "settings":
+            self._answer(cb_id)
+            self._edit(chat_id, mid, self._settings_text(), self._settings_kb())
+
+        elif head == "setint":
+            self.store.set_setting("interval", parts[1])
+            self._answer(cb_id, f"Интервал: {parts[1]} c")
+            self._edit(chat_id, mid, self._settings_text(), self._settings_kb())
+
+        elif head == "sethour":
+            for k in ("daily_hour", "weekly_hour", "monthly_hour"):
+                self.store.set_setting(k, parts[1])
+            self._answer(cb_id, f"Час отчётов: {parts[1]}:00 МСК")
+            self._edit(chat_id, mid, self._settings_text(), self._settings_kb())
+
+        elif head == "togrep":
+            cur = self.store.get_bool_setting("reports_enabled", True)
+            self.store.set_setting("reports_enabled", "0" if cur else "1")
+            self._answer(cb_id, "Автоотчёты " + ("выкл" if cur else "вкл"))
+            self._edit(chat_id, mid, self._settings_text(), self._settings_kb())
+
+        elif head == "recent":
+            sid = int(parts[1])
+            self._answer(cb_id)
+            self._edit(chat_id, mid, self._recent_text(sid),
+                       _kb([[_btn("🔄 Обновить", f"recent:{sid}")],
+                            [_btn("⬅️ Назад", f"src:{sid}")]]))
+
         else:
             self._answer(cb_id)
 
@@ -340,6 +386,7 @@ class ManagementBot(threading.Thread):
             [_btn("➕ Добавить рассылку", "sadd")],
             [_btn("🆔 VK-чаты (peer_id)", "vkchats")],
             [_btn("🔑 Перелогиниться в alpinbet", "relogin")],
+            [_btn("⚙️ Настройки", "settings")],
             [_btn("ℹ️ Статус", "status")],
         ])
 
@@ -366,7 +413,11 @@ class ManagementBot(threading.Thread):
             f"  • {d.kind.upper()} {d.chat_id} "
             f"({'sig' if d.send_signals else '–'}/{'rep' if d.send_reports else '–'})"
             for d in dests) or "  • каналов нет"
+        since = datetime.now(MSK).replace(hour=0, minute=0, second=0, microsecond=0)
+        sent, win, lose, ret = self.store.counts_since_source(
+            sid, since.astimezone(timezone.utc).isoformat())
         return (f"📨 {s.name}\n{s.dispatch_url}\nСтатус: {flag}\n"
+                f"Сегодня: отправлено {sent}, ✅{win}/✖️{lose}/♻️{ret}\n"
                 f"Каналы:\n{dlines}")
 
     def _source_kb(self, sid: int) -> str:
@@ -376,6 +427,7 @@ class ManagementBot(threading.Thread):
             [_btn(*toggle)],
             [_btn("📡 Каналы доставки", f"dst:{sid}")],
             [_btn("📊 Отправить отчёт", f"rep:{sid}")],
+            [_btn("🧾 Последние сигналы", f"recent:{sid}")],
             [_btn("🗑 Удалить рассылку", f"del:{sid}")],
             [_btn("⬅️ К списку", "slist")],
         ])
@@ -466,6 +518,61 @@ class ManagementBot(threading.Thread):
             lines.append(f"• {c['title']} — peer_id: {pid}{extra}")
         return ("🆔 VK-беседы и чаты (для привязки VK-канала бери peer_id):\n\n"
                 + "\n".join(lines))
+
+    def _settings_text(self) -> str:
+        interval = self.store.get_int_setting("interval", self.cfg.interval)
+        dh = self.store.get_int_setting("daily_hour", self.cfg.daily_hour)
+        wh = self.store.get_int_setting("weekly_hour", self.cfg.weekly_hour)
+        mh = self.store.get_int_setting("monthly_hour", self.cfg.monthly_hour)
+        rep = self.store.get_bool_setting("reports_enabled", True)
+        hours = f"{dh}:00" if dh == wh == mh else f"день {dh} / нед {wh} / мес {mh}"
+        return ("⚙️ Настройки (применяются на лету, без рестарта)\n\n"
+                f"⏱ Интервал опроса: {interval} c\n"
+                f"🕘 Час автоотчётов (МСК): {hours}\n"
+                f"📊 Автоотчёты: {'вкл ✅' if rep else 'выкл ⛔'}\n\n"
+                "Ряд 1 — интервал, ряд 2 — час отчётов:")
+
+    def _settings_kb(self) -> str:
+        rep = self.store.get_bool_setting("reports_enabled", True)
+        return _kb([
+            [_btn("⏱ 10с", "setint:10"), _btn("15с", "setint:15"),
+             _btn("30с", "setint:30"), _btn("60с", "setint:60")],
+            [_btn("🕘 7", "sethour:7"), _btn("8", "sethour:8"), _btn("9", "sethour:9"),
+             _btn("10", "sethour:10"), _btn("12", "sethour:12")],
+            [_btn("⛔ Выключить автоотчёты" if rep else "✅ Включить автоотчёты", "togrep")],
+            [_btn("⬅️ В меню", "menu:main")],
+        ])
+
+    def _recent_text(self, sid: int) -> str:
+        rows = self.store.recent_signals(sid, 8)
+        if not rows:
+            return f"🧾 «{self._src_name(sid)}» — последних сигналов нет"
+        lines = []
+        for r in rows:
+            when = self._fmt_msk(r["sent_at"])
+            teams = f"{r['home_team']} - {r['away_team']}".strip(" -") or r["forecast_id"]
+            if r["settled"]:
+                icon = {"win": "✅", "lose": "✖️", "return": "♻️"}.get(r["outcome"], "♻️")
+                res = f"{icon} {r['profit_units'] / 1000:+.2f}%"
+            else:
+                res = "⏳ live"
+            lines.append(f"{when}  {teams}  {res}")
+        return f"🧾 Последние сигналы «{self._src_name(sid)}»:\n\n" + "\n".join(lines)
+
+    def _vk_pick_kb(self, sid: int) -> str:
+        rows: list[list[dict]] = []
+        try:
+            convs = senders.vk_list_conversations(
+                self.cfg.vk_token, self.cfg.vk_api_version, self.cfg.http_timeout)
+            convs.sort(key=lambda c: (c["type"] != "chat", str(c["title"]).lower()))
+            for c in convs[:20]:
+                title = str(c["title"])[:40]
+                rows.append([_btn(f"{title} ({c['peer_id']})", f"vkpick:{sid}:{c['peer_id']}")])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("vk pick list: %s", exc)
+        rows.append([_btn("↩️ Ввести peer_id вручную", f"dstaddm:{sid}:vk")])
+        rows.append([_btn("⬅️ Назад", f"dst:{sid}")])
+        return _kb(rows)
 
     @staticmethod
     def _fmt_msk(iso: str) -> str:

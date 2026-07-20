@@ -5,10 +5,31 @@
 """
 from __future__ import annotations
 
+import os
+import socket
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
+
+
+def sd_notify(state: str) -> None:
+    """Отправить сообщение systemd через $NOTIFY_SOCKET (READY=1 / WATCHDOG=1).
+
+    No-op вне systemd (переменная не задана). Нужно для Type=notify + WatchdogSec:
+    если WATCHDOG=1 перестаёт приходить (тихий зависон), systemd перезапустит сервис.
+    """
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):  # абстрактный сокет
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(addr)
+            sock.sendall(state.encode())
+    except OSError:
+        pass
 
 
 class RuntimeStatus:

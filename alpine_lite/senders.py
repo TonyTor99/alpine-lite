@@ -30,13 +30,25 @@ _session.mount("http://", _adapter)
 
 
 # ===================== Telegram =====================
+MAX_FLOOD_WAIT = 30  # сек — верхняя граница ожидания по retry_after
+
+
 def _tg_call(token: str, method: str, *, data=None, files=None, timeout=25):
-    r = _session.post(TG_API.format(token=token, method=method),
-                      data=data, files=files, timeout=timeout)
-    payload = r.json()
-    if not payload.get("ok"):
+    for attempt in range(2):
+        r = _session.post(TG_API.format(token=token, method=method),
+                          data=data, files=files, timeout=timeout)
+        payload = r.json()
+        if payload.get("ok"):
+            return payload["result"]
+        # флуд-лимит: уважаем retry_after и один раз повторяем
+        if payload.get("error_code") == 429 and attempt == 0:
+            wait = (payload.get("parameters") or {}).get("retry_after", 1)
+            wait = min(int(wait) + 1, MAX_FLOOD_WAIT)
+            log.warning("TG %s: флуд-лимит 429, жду %d c", method, wait)
+            time.sleep(wait)
+            continue
         raise RuntimeError(f"TG {method}: {payload.get('description')}")
-    return payload["result"]
+    raise RuntimeError(f"TG {method}: 429 после повтора")
 
 
 def tg_send_photo(token: str, chat_id: str, caption_html: str,
@@ -82,6 +94,10 @@ def tg_edit_caption(token: str, chat_id: str, message_id: int,
             }, timeout=timeout)
             return
         raise
+
+
+def tg_get_me(token: str, timeout: int = 15) -> dict:
+    return _tg_call(token, "getMe", timeout=timeout)
 
 
 def tg_send_message(token: str, chat_id: str, text_html: str, timeout: int = 25) -> int:

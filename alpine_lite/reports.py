@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from . import notifier
 from .alpinbet import AlpinbetClient, StatRow, parse_day_label, parse_month_label
 from .config import Config
+from .sending import ReportJob, SenderWorker
 from .store import Source, Store
 
 log = logging.getLogger("alpine.reports")
@@ -88,28 +89,17 @@ def _build_text(stats: dict[str, list[StatRow]], kind: str, source: Source,
     raise ValueError(kind)
 
 
-def _send_report(cfg: Config, store: Store, source: Source, text_html: str) -> int:
-    from . import senders
+def _enqueue_report(worker: SenderWorker, store: Store, source: Source, text_html: str) -> int:
     text_plain = _to_plain(text_html)
-    delivered = 0
-    for d in store.list_destinations(source.id):
-        if not d.send_reports:
-            continue
-        try:
-            if d.kind == "tg":
-                senders.tg_send_message(cfg.tg_token, d.chat_id, text_html, cfg.http_timeout)
-            elif d.kind == "vk":
-                senders.vk_send_message(cfg.vk_token, d.chat_id, text_plain,
-                                        cfg.vk_api_version, cfg.http_timeout)
-            delivered += 1
-        except Exception as exc:  # noqa: BLE001
-            log.error("Отчёт %s -> %s %s: %s", source.id, d.kind, d.chat_id, exc)
-    return delivered
+    dests = [d for d in store.list_destinations(source.id) if d.send_reports]
+    if dests:
+        worker.submit(ReportJob(text_html=text_html, text_plain=text_plain, dests=dests))
+    return len(dests)
 
 
 def run_one(client: AlpinbetClient, store: Store, cfg: Config, source: Source,
-            kind: str, *, force: bool = False) -> str:
-    """Собрать и отправить один отчёт. Возвращает короткий статус для бота."""
+            kind: str, worker: SenderWorker, *, force: bool = False) -> str:
+    """Собрать отчёт и поставить в очередь отправки. Возвращает статус для бота."""
     now_msk = datetime.now(MSK)
     key = _period_key(kind, now_msk)
     if not force and store.stats_already_sent(source.id, kind, key):
@@ -122,30 +112,39 @@ def run_one(client: AlpinbetClient, store: Store, cfg: Config, source: Source,
         if not force:
             store.mark_stats_sent(source.id, kind, key)
         return "нет данных за период"
-    delivered = _send_report(cfg, store, source, text)
+    n = _enqueue_report(worker, store, source, text)
     if not force:
         store.mark_stats_sent(source.id, kind, key)
-    return f"отправлено в {delivered} канал(ов)"
+    return f"поставлено в очередь ({n} канал.)"
 
 
-def maybe_send_scheduled(client: AlpinbetClient, store: Store, cfg: Config) -> None:
-    """Вызывать в каждой итерации poll-loop. Шлёт отчёты по достижении часа МСК."""
+def maybe_send_scheduled(client: AlpinbetClient, store: Store, cfg: Config,
+                         worker: SenderWorker) -> None:
+    """Вызывать в каждой итерации poll-loop. Шлёт отчёты по достижении часа МСК.
+
+    Часы и вкл/выкл автоотчётов берутся из настроек (settings), фоллбэк — из .env.
+    """
+    if not store.get_bool_setting("reports_enabled", True):
+        return
     now_msk = datetime.now(MSK)
+    daily = store.get_int_setting("daily_hour", cfg.daily_hour)
+    weekly = store.get_int_setting("weekly_hour", cfg.weekly_hour)
+    monthly = store.get_int_setting("monthly_hour", cfg.monthly_hour)
     for source in store.list_sources(enabled_only=True):
         due: list[str] = []
-        if now_msk.hour >= cfg.daily_hour:
+        if now_msk.hour >= daily:
             due.append("day")
-        if now_msk.weekday() == 0 and now_msk.hour >= cfg.weekly_hour:
+        if now_msk.weekday() == 0 and now_msk.hour >= weekly:
             due.append("week")
-        if now_msk.day == 1 and now_msk.hour >= cfg.monthly_hour:
+        if now_msk.day == 1 and now_msk.hour >= monthly:
             due.append("month")
         for kind in due:
             key = _period_key(kind, now_msk)
             if store.stats_already_sent(source.id, kind, key):
                 continue
             try:
-                status = run_one(client, store, cfg, source, kind)
-                lvl = log.info if status.startswith("отправлено") else log.debug
+                status = run_one(client, store, cfg, source, kind, worker)
+                lvl = log.info if status.startswith("поставлено") else log.debug
                 lvl("Отчёт %s/%s «%s»: %s", kind, key, source.name, status)
             except Exception as exc:  # noqa: BLE001
                 log.error("Отчёт %s source=%s упал: %s", kind, source.id, exc)

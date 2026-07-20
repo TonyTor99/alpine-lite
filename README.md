@@ -16,6 +16,10 @@
 - Управление — через **Telegram-бота на инлайн-кнопках** (см. ниже). Состояние — в `state.db` (sqlite).
 - Глобальная **пауза/старт** всего опроса, ручной **релогин**, **тест доставки** канала.
 - **Уведомления админам** при сбоях (троттлинг/логин/сеть) + авто-«снова онлайн».
+- **Асинхронная отправка** (отдельный поток-воркер): медленный TG/VK не блокирует опрос.
+- **systemd-watchdog**: тихий зависон → авто-рестарт. **force IPv4** против мёртвого IPv6 к Telegram.
+- **Настройки из бота** (интервал, часы отчётов, вкл/выкл автоотчётов) — без редеплоя.
+- Добавление VK-канала **выбором из списка бесед**; **счётчики и последние сигналы** по рассылке.
 
 ## Установка
 
@@ -91,15 +95,19 @@ journalctl -u alpine-danil-lite -f
 ## Архитектура
 
 ```
-main.py            poll-loop (опрос + отчёты + пауза + очереди отчётов/релогина + алерты) + bot-loop
+main.py            poll-loop (опрос + планировщик отчётов + пауза + очереди + алерты + watchdog)
+                   + sender-worker (асинхронная отправка) + bot-loop
 alpine_lite/
   config.py        .env
+  netfix.py        force IPv4 (обход мёртвого IPv6 к api.telegram.org)
   alpinbet.py      вход/релогин + парс прогнозов (с image_url) + парс таблиц прибыли
   notifier.py      тексты сигналов и отчётов
-  senders.py       TG (sendPhoto/editCaption/sendMessage) + VK (upload+messages.send) + notify_admins
+  senders.py       TG (sendPhoto/editCaption/sendMessage, retry_after) + VK + notify_admins + getConversations
   store.py         sqlite: sources / destinations / signals / stats_sent / settings
-  runner.py        проход по рассылке: новые → VK фото + TG фото; завершённые → TG editCaption
-  reports.py       суточный/недельный/месячный отчёт + расписание МСК
-  runtime.py       разделяемый статус: аптайм / последний цикл / состояние логина
-  bot.py           инлайн-кнопочное управление (пауза, релогин, тест доставки, статус)
+  runner.py        проход по рассылке: ставит задания отправки в очередь воркера
+  sending.py       SenderWorker: поток-воркер отправки (сигналы/итоги/отчёты)
+  reports.py       суточный/недельный/месячный отчёт + расписание МСК (часы из settings)
+  runtime.py       разделяемый статус (аптайм/цикл/логин) + sd_notify (systemd watchdog)
+  bot.py           инлайн-кнопки: пауза, релогин, тест доставки, VK-список, настройки, статус
+tests/             pytest: парсер, периоды, стор
 ```
