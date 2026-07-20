@@ -1,0 +1,17 @@
+[Unit]
+Description=alpine-danil-lite — парсер alpinbet -> VK/TG (сигналы + отчёты)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tony
+WorkingDirectory=/home/tony/projects/alpine-danil-lite
+ExecStart=/home/tony/projects/alpine-danil-lite/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/tony/projects/alpine-danil-lite/logs/app.log
+StandardError=append:/home/tony/projects/alpine-danil-lite/logs/app.log
+
+[Install]
+WantedBy=multi-user.target
