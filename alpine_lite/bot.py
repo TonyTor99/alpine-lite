@@ -189,6 +189,11 @@ class ManagementBot(threading.Thread):
             self._answer(cb_id, "Опрос возобновлён")
             self._edit(chat_id, mid, self._main_title(), self._main_kb())
 
+        elif head == "vkchats":
+            self._answer(cb_id, "Запрашиваю у VK…")
+            self._edit(chat_id, mid, self._vk_chats_text(),
+                       _kb([[_btn("🔄 Обновить", "vkchats")], [_btn("⬅️ В меню", "menu:main")]]))
+
         elif head == "relogin":
             self.control_queue.put(("relogin", chat_id))
             self._answer(cb_id, "Ставлю релогин в очередь…")
@@ -333,6 +338,7 @@ class ManagementBot(threading.Thread):
             [toggle],
             [_btn("📋 Рассылки", "slist")],
             [_btn("➕ Добавить рассылку", "sadd")],
+            [_btn("🆔 VK-чаты (peer_id)", "vkchats")],
             [_btn("🔑 Перелогиниться в alpinbet", "relogin")],
             [_btn("ℹ️ Статус", "status")],
         ])
@@ -442,6 +448,24 @@ class ManagementBot(threading.Thread):
             err = f"\n   ⚠️ {s.last_error}" if s.last_error else ""
             lines.append(f"{flag} {s.name} — last_run: {self._fmt_msk(s.last_run_at)}{err}")
         return head + "\nПо рассылкам:\n" + ("\n".join(lines) or "Рассылок нет")
+
+    def _vk_chats_text(self) -> str:
+        try:
+            convs = senders.vk_list_conversations(
+                self.cfg.vk_token, self.cfg.vk_api_version, self.cfg.http_timeout)
+        except Exception as exc:  # noqa: BLE001
+            return f"🆔 VK-чаты\nНе удалось получить список: {exc}"
+        if not convs:
+            return "🆔 VK-чаты\nБесед не найдено."
+        # сначала беседы (chat), потом остальное — беседы обычно и есть каналы доставки
+        convs.sort(key=lambda c: (c["type"] != "chat", str(c["title"]).lower()))
+        lines = []
+        for c in convs:
+            pid = c["peer_id"]
+            extra = f"  (chat_id: {pid - 2000000000})" if c["type"] == "chat" else ""
+            lines.append(f"• {c['title']} — peer_id: {pid}{extra}")
+        return ("🆔 VK-беседы и чаты (для привязки VK-канала бери peer_id):\n\n"
+                + "\n".join(lines))
 
     @staticmethod
     def _fmt_msk(iso: str) -> str:

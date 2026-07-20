@@ -158,6 +158,36 @@ def vk_send_message(token: str, peer_id: str, text: str,
     }, api_version, timeout)
 
 
+def vk_list_conversations(token: str, api_version: str = "5.199", timeout: int = 25,
+                          count: int = 200) -> list[dict]:
+    """Список бесед/чатов VK: [{'title','peer_id','type'}]. Метод messages.getConversations.
+
+    Нужен, чтобы удобно взять peer_id для привязки VK-канала доставки.
+    """
+    resp = _vk_call(token, "messages.getConversations",
+                    {"count": count, "extended": 1, "filter": "all"}, api_version, timeout)
+    profiles = {p["id"]: p for p in resp.get("profiles", [])}
+    groups = {g["id"]: g for g in resp.get("groups", [])}
+    out: list[dict] = []
+    for item in resp.get("items", []):
+        conv = item.get("conversation", {})
+        peer = conv.get("peer", {})
+        pid = peer.get("id")
+        ptype = peer.get("type")
+        if ptype == "chat":
+            title = (conv.get("chat_settings") or {}).get("title") or f"Беседа {pid}"
+        elif ptype == "user":
+            p = profiles.get(pid, {})
+            title = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip() or f"User {pid}"
+        elif ptype == "group":
+            g = groups.get(abs(pid) if pid else 0, {})
+            title = g.get("name") or f"Group {pid}"
+        else:
+            title = f"{ptype} {pid}"
+        out.append({"title": title, "peer_id": pid, "type": ptype})
+    return out
+
+
 # ===================== служебные уведомления админам =====================
 def notify_admins(token: str, admin_chat_ids, text: str, timeout: int = 20) -> None:
     """Разослать служебное сообщение всем админам (в личку боту). Best-effort."""
