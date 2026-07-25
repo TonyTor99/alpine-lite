@@ -57,6 +57,64 @@ def test_parse_rows_active_and_settled():
     assert settled.profit_units == -1000
 
 
+# Новая вёрстка alpinbet для рассчитанных прогнозов: ссылка в .cell-oboroty,
+# счёт в .cell-count, коэф. в .completed_rate_desc, итог в .cell-subscribers span
+# (выигрыш — БЕЗ класса, проигрыш class="lose", возврат class="return").
+SETTLED_NEW_HTML = """
+<div id="pjax-forecast-list">
+  <div class="rTableLine table-header"><div class="cell-oboroty">Матч</div></div>
+  <div class="rTableLine">
+    <div class="cell-icon js-sport-tooltip" data-tippy-content="Баскетбол"></div>
+    <div class="cell-oboroty"><a href="/forecast/basketball/192131355-negeri-sembilan-vs-sabah-23-07-2026">
+      <span class="time-event">23.07.2026, 11:00</span>
+      <span class="cell-team-command">Negeri Sembilan</span>
+      <span class="cell-team-command">Sabah</span>
+      <span class="cell-team-tnm">Malaysia. MABA Cup</span>
+    </a></div>
+    <div class="cell-prognos"><div class="completed_rate_desc"><div class="rate">2.00</div></div>
+      <div class="rate-description">с ОТ. ТМ (154.5)</div></div>
+    <div class="cell-count">105:45</div>
+    <div class="cell-subscribers cell-subscribers-forcast"><span class="">1 000<span class="rouble">o</span></span></div>
+  </div>
+  <div class="rTableLine">
+    <div class="cell-oboroty"><a href="/forecast/basketball/192131300-a-vs-b-23-07-2026">
+      <span class="cell-team-command">A</span><span class="cell-team-command">B</span></a></div>
+    <div class="cell-prognos"><div class="completed_rate_desc"><div class="rate">1.85</div></div></div>
+    <div class="cell-count">70:90</div>
+    <div class="cell-subscribers"><span class="lose">-1 000<span class="rouble">o</span></span></div>
+  </div>
+  <div class="rTableLine">
+    <div class="cell-oboroty"><a href="/forecast/basketball/192131301-c-vs-d-23-07-2026">
+      <span class="cell-team-command">C</span><span class="cell-team-command">D</span></a></div>
+    <div class="cell-prognos"><div class="completed_rate_desc"><div class="rate">1.90</div></div></div>
+    <div class="cell-count">2:2</div>
+    <div class="cell-subscribers"><span class="return">0<span class="rouble">o</span></span></div>
+  </div>
+</div>
+"""
+
+
+def test_parse_rows_new_layout_settled():
+    rows = AlpinbetClient.parse_rows(SETTLED_NEW_HTML)
+    assert len(rows) == 3
+    win, lose, ret = rows
+
+    assert win.forecast_id == "192131355"
+    assert win.sport == "Баскетбол"
+    assert win.home_team == "Negeri Sembilan"
+    assert win.away_team == "Sabah"
+    assert win.league == "Malaysia. MABA Cup"
+    assert win.coefficient == "2.00"
+    assert win.bet_type == "с ОТ. ТМ (154.5)"
+    assert win.score == "105:45"
+    assert win.settled is True
+    assert win.outcome == "win"
+    assert win.profit_units == 1000
+
+    assert lose.settled is True and lose.outcome == "lose" and lose.profit_units == -1000
+    assert ret.settled is True and ret.outcome == "return" and ret.profit_units == 0
+
+
 STATS_HTML = """
 <div id="tab-day">
   <div class="rTableLine table-header">

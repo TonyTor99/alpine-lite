@@ -269,9 +269,15 @@ class AlpinbetClient:
         soup = BeautifulSoup(html, "lxml")
         result: list[ParsedForecast] = []
         for row in soup.select(".rTableLine"):
-            link = row.select_one(".cell-team-title a[href]")
+            if "table-header" in (row.get("class") or []):
+                continue  # строка-шапка таблицы
+            # ссылка на прогноз: активный (live) -> .cell-team-title a,
+            # рассчитанный/предматч -> .cell-oboroty a (новая вёрстка alpinbet)
+            link = (row.select_one(".cell-team-title a[href]")
+                    or row.select_one(".cell-oboroty a[href]")
+                    or row.select_one('a[href*="/forecast/"]'))
             if not link:
-                continue  # строка-шапка
+                continue
 
             href = link.get("href", "")
             tail = href.rstrip("/").split("/")[-1]
@@ -286,30 +292,30 @@ class AlpinbetClient:
             teams = [_txt(t) for t in row.select(".cell-team-command")]
             sport_icon = row.select_one(".cell-icon.js-sport-tooltip")
 
-            outcome_span = row.select_one("span.win, span.lose, span.return")
-            settled = outcome_span is not None
-            outcome = None
-            profit_units = 0
-            if outcome_span:
-                classes = outcome_span.get("class", [])
-                for c in ("win", "lose", "return"):
-                    if c in classes:
-                        outcome = c
-                        break
-                profit_units = _parse_profit_units(
-                    outcome_span.get_text(" ", strip=True))
+            outcome, profit_units, settled = cls._parse_outcome(row)
+
+            # счёт: live -> .cell-team-score, рассчитанный -> .cell-count
+            score = (_txt(row.select_one(".cell-team-score"))
+                     or _txt(row.select_one(".cell-count")))
+            # коэффициент: live -> .cell-coefficient__total, рассчитанный -> .rate
+            coefficient = (_txt(row.select_one(".cell-coefficient__total"))
+                           or _txt(row.select_one(".completed_rate_desc .rate"))
+                           or _txt(row.select_one(".cell-prognos .rate")))
+            # тип ставки: live -> .cell-type .info-help, рассчитанный -> .rate-description
+            bet_type = (_txt(row.select_one(".cell-type .info-help"))
+                        or _txt(row.select_one(".rate-description")))
 
             result.append(ParsedForecast(
                 forecast_id=forecast_id,
                 sport=sport_icon.get("data-tippy-content") if sport_icon else None,
                 status=status,
                 minute=_txt(row.select_one(".js-current-minutes")),
-                score=_txt(row.select_one(".cell-team-score")),
+                score=score,
                 home_team=teams[0] if len(teams) > 0 else None,
                 away_team=teams[1] if len(teams) > 1 else None,
                 league=_txt(row.select_one(".cell-team-tnm")),
-                bet_type=_txt(row.select_one(".cell-type .info-help")),
-                coefficient=_txt(row.select_one(".cell-coefficient__total")),
+                bet_type=bet_type,
+                coefficient=coefficient,
                 url=urljoin(BASE, href),
                 image_url=cls._extract_image(row),
                 settled=settled,
@@ -317,6 +323,35 @@ class AlpinbetClient:
                 profit_units=profit_units,
             ))
         return result
+
+    @staticmethod
+    def _parse_outcome(row) -> tuple[Optional[str], int, bool]:
+        """Разбор итога прогноза для обеих вёрсток alpinbet.
+
+        Новая вёрстка: рассчитанный прогноз помечен блоком ``.completed_rate_desc``,
+        а результат лежит в ``.cell-subscribers span`` — проигрыш ``class="lose"``,
+        возврат ``class="return"``, ВЫИГРЫШ идёт БЕЗ класса (пустой ``class=""``).
+        Старая live-вёрстка использовала ``span.win/lose/return`` напрямую.
+
+        Возвращает ``(outcome, profit_units, settled)``.
+        """
+        span = (row.select_one(".cell-subscribers span")
+                or row.select_one("span.win, span.lose, span.return"))
+        if span is None:
+            return None, 0, False
+        classes = span.get("class") or []
+        completed = row.select_one(".completed_rate_desc") is not None
+        if "lose" in classes:
+            outcome = "lose"
+        elif "return" in classes:
+            outcome = "return"
+        elif "win" in classes or completed:
+            outcome = "win"
+        else:
+            # предматч/в игре: явного итога нет и прогноз не рассчитан
+            return None, 0, False
+        profit_units = _parse_profit_units(span.get_text(" ", strip=True))
+        return outcome, profit_units, True
 
     # ---- статистика прибыли (полная страница рассылки) ----
     def fetch_stats_tables(self, dispatch_url: str) -> dict[str, list[StatRow]]:
