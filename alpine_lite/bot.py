@@ -87,6 +87,18 @@ class ManagementBot(threading.Thread):
         except Exception:  # noqa: BLE001
             pass
 
+    def _vk_token(self) -> str:
+        """Актуальный VK-токен: override из БД (задан ботом) или fallback из .env."""
+        return self.store.get_vk_token(self.cfg.vk_token)
+
+    @staticmethod
+    def _mask_token(token: str) -> str:
+        if not token:
+            return "— не задан"
+        if len(token) <= 12:
+            return "•" * len(token)
+        return f"{token[:6]}…{token[-4:]} ({len(token)} симв.)"
+
     def _send_test(self, dest) -> tuple[bool, str]:
         """Реальное тестовое сообщение в канал/беседу. TG/VK — без сессии alpinbet."""
         stamp = time.strftime("%d.%m %H:%M:%S")
@@ -97,7 +109,7 @@ class ManagementBot(threading.Thread):
                 senders.tg_send_message(self.cfg.tg_token, dest.chat_id, text,
                                         self.cfg.http_timeout)
             elif dest.kind == "vk":
-                senders.vk_send_message(self.cfg.vk_token, dest.chat_id, text,
+                senders.vk_send_message(self._vk_token(), dest.chat_id, text,
                                         self.cfg.vk_api_version, self.cfg.http_timeout)
             else:
                 return False, f"неизвестный тип канала {dest.kind}"
@@ -155,6 +167,21 @@ class ManagementBot(threading.Thread):
             self.store.add_destination(source_id, kind, text, True, True)
             self.reply(chat_id, f"✅ Канал {kind.upper()} {text} привязан",
                        self._dest_list_kb(source_id))
+        elif action == "set_vk_token":
+            token = text.strip()
+            # проверяем токен реальным вызовом VK перед сохранением
+            try:
+                senders.vk_list_conversations(
+                    token, self.cfg.vk_api_version, self.cfg.http_timeout, count=1)
+            except Exception as exc:  # noqa: BLE001
+                self.reply(chat_id, f"❌ Токен не принят VK: {str(exc)[:200]}\n"
+                                    f"Ничего не менял, старый ключ на месте.",
+                           self._settings_kb())
+                return
+            self.store.set_setting("vk_token", token)
+            self.reply(chat_id, f"✅ VK-ключ обновлён и проверен: {self._mask_token(token)}\n"
+                                f"Применяется на лету — рассылки уже идут с новым ключом.",
+                       self._settings_kb())
 
     # ---------- callbacks ----------
     def _on_callback(self, cb):
@@ -360,6 +387,20 @@ class ManagementBot(threading.Thread):
             self._answer(cb_id, "Автоотчёты " + ("выкл" if cur else "вкл"))
             self._edit(chat_id, mid, self._settings_text(), self._settings_kb())
 
+        elif head == "vktok":
+            self._answer(cb_id)
+            self._edit(chat_id, mid, self._vk_token_text(),
+                       _kb([[_btn("✏️ Заменить VK-ключ", "vktokset")],
+                            [_btn("⬅️ К настройкам", "settings")]]))
+
+        elif head == "vktokset":
+            self._pending[chat_id] = ("set_vk_token",)
+            self._answer(cb_id)
+            self._edit(chat_id, mid, "🔑 Пришли ответным сообщением новый VK user-токен.\n"
+                                     "Я проверю его вызовом VK и, если валиден, применю сразу.\n"
+                                     "Любое сообщение с «/» — отмена.",
+                       _kb([[_btn("⬅️ Отмена", "vktok")]]))
+
         elif head == "recent":
             sid = int(parts[1])
             self._answer(cb_id)
@@ -504,7 +545,7 @@ class ManagementBot(threading.Thread):
     def _vk_chats_text(self) -> str:
         try:
             convs = senders.vk_list_conversations(
-                self.cfg.vk_token, self.cfg.vk_api_version, self.cfg.http_timeout)
+                self._vk_token(), self.cfg.vk_api_version, self.cfg.http_timeout)
         except Exception as exc:  # noqa: BLE001
             return f"🆔 VK-чаты\nНе удалось получить список: {exc}"
         if not convs:
@@ -529,7 +570,8 @@ class ManagementBot(threading.Thread):
         return ("⚙️ Настройки (применяются на лету, без рестарта)\n\n"
                 f"⏱ Интервал опроса: {interval} c\n"
                 f"🕘 Час автоотчётов (МСК): {hours}\n"
-                f"📊 Автоотчёты: {'вкл ✅' if rep else 'выкл ⛔'}\n\n"
+                f"📊 Автоотчёты: {'вкл ✅' if rep else 'выкл ⛔'}\n"
+                f"🔑 VK-ключ: {self._mask_token(self._vk_token())}\n\n"
                 "Ряд 1 — интервал, ряд 2 — час отчётов:")
 
     def _settings_kb(self) -> str:
@@ -540,8 +582,19 @@ class ManagementBot(threading.Thread):
             [_btn("🕘 7", "sethour:7"), _btn("8", "sethour:8"), _btn("9", "sethour:9"),
              _btn("10", "sethour:10"), _btn("12", "sethour:12")],
             [_btn("⛔ Выключить автоотчёты" if rep else "✅ Включить автоотчёты", "togrep")],
+            [_btn("🔑 VK-ключ", "vktok")],
             [_btn("⬅️ В меню", "menu:main")],
         ])
+
+    def _vk_token_text(self) -> str:
+        token = self._vk_token()
+        src = "override из БД (задан ботом)" if self.store.get_setting("vk_token", "") \
+            else "из .env (дефолт)"
+        return ("🔑 VK-ключ (user-токен для рассылки картинок/сообщений)\n\n"
+                f"Текущий: {self._mask_token(token)}\n"
+                f"Источник: {src}\n\n"
+                "Замена применяется на лету, без рестарта сервиса. "
+                "Новый ключ проверяется вызовом VK перед сохранением.")
 
     def _recent_text(self, sid: int) -> str:
         rows = self.store.recent_signals(sid, 8)
@@ -563,7 +616,7 @@ class ManagementBot(threading.Thread):
         rows: list[list[dict]] = []
         try:
             convs = senders.vk_list_conversations(
-                self.cfg.vk_token, self.cfg.vk_api_version, self.cfg.http_timeout)
+                self._vk_token(), self.cfg.vk_api_version, self.cfg.http_timeout)
             convs.sort(key=lambda c: (c["type"] != "chat", str(c["title"]).lower()))
             for c in convs[:20]:
                 title = str(c["title"])[:40]

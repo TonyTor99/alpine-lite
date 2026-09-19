@@ -81,8 +81,9 @@ class SenderWorker(threading.Thread):
         # VK — основной канал (шлём первым, гарантируем картинку)
         for d in j.vk_dests:
             try:
-                senders.vk_send_photo(self.cfg.vk_token, d.chat_id, j.caption_plain,
-                                      j.image_bytes, self.cfg.vk_api_version, self.cfg.http_timeout)
+                senders.vk_send_photo(self.store.get_vk_token(self.cfg.vk_token), d.chat_id,
+                                      j.caption_plain, j.image_bytes,
+                                      self.cfg.vk_api_version, self.cfg.http_timeout)
             except Exception as exc:  # noqa: BLE001
                 log.error("VK send peer=%s forecast=%s: %s", d.chat_id, j.forecast_id, exc)
 
@@ -113,7 +114,8 @@ class SenderWorker(threading.Thread):
                     senders.tg_send_message(self.cfg.tg_token, d.chat_id,
                                             j.text_html, self.cfg.http_timeout)
                 elif d.kind == "vk":
-                    senders.vk_send_message(self.cfg.vk_token, d.chat_id, j.text_plain,
+                    senders.vk_send_message(self.store.get_vk_token(self.cfg.vk_token), d.chat_id,
+                                            j.text_plain,
                                             self.cfg.vk_api_version, self.cfg.http_timeout)
             except Exception as exc:  # noqa: BLE001
                 log.error("report -> %s %s: %s", d.kind, d.chat_id, exc)

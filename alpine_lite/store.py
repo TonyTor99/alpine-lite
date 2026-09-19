@@ -302,6 +302,11 @@ class Store:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
             self._db.commit()
 
+    def get_vk_token(self, fallback: str = "") -> str:
+        """Актуальный VK-токен: override из БД (задаётся ботом) или fallback из .env."""
+        val = self.get_setting("vk_token", "")
+        return val if val else fallback
+
     def is_paused(self) -> bool:
         return self.get_setting("paused", "0") == "1"
 
