@@ -169,17 +169,9 @@ class ManagementBot(threading.Thread):
                        self._dest_list_kb(source_id))
         elif action == "set_vk_token":
             token = text.strip()
-            # проверяем токен реальным вызовом VK перед сохранением
-            try:
-                senders.vk_list_conversations(
-                    token, self.cfg.vk_api_version, self.cfg.http_timeout, count=1)
-            except Exception as exc:  # noqa: BLE001
-                self.reply(chat_id, f"❌ Токен не принят VK: {str(exc)[:200]}\n"
-                                    f"Ничего не менял, старый ключ на месте.",
-                           self._settings_kb())
-                return
+            # без проверок — просто перезаписываем ключ (VK-валидация падала на Flood control)
             self.store.set_setting("vk_token", token)
-            self.reply(chat_id, f"✅ VK-ключ обновлён и проверен: {self._mask_token(token)}\n"
+            self.reply(chat_id, f"✅ VK-ключ перезаписан: {self._mask_token(token)}\n"
                                 f"Применяется на лету — рассылки уже идут с новым ключом.",
                        self._settings_kb())
 
